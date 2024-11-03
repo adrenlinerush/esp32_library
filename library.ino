@@ -5,12 +5,15 @@
 #include <SPI.h>
 #include <FS.h>
 #include "SD.h"
+#include <ESPmDNS.h>
 #include <map>
 
 std::map<String, String> config;
 std::map<String, String> sessions;
 
-const int RESULTS_PER_PAGE = 100;
+IPAddress allowedHost;
+
+const int RESULTS_PER_PAGE = 15;
 char* errMsg;
 sqlite3 *db;
 int rc;
@@ -22,6 +25,22 @@ char current_db[255];
 WebServer server(80);
 
 const char* headersToCollect[] = {"Cookie"};
+
+IPAddress parseIPAddress(const String &ipStr) {
+    int parts[4] = {0};
+    int partIndex = 0;
+
+    int start = 0;
+    for (int i = 0; i < ipStr.length(); i++) {
+        if (ipStr.charAt(i) == '.' || i == ipStr.length() - 1) {
+            if (i == ipStr.length() - 1) i++;
+            parts[partIndex++] = ipStr.substring(start, i).toInt();
+            start = i + 1;
+        }
+    }
+
+    return IPAddress(parts[0], parts[1], parts[2], parts[3]);
+}
 
 void readConfig(fs::FS &fs){
   Serial.println("Openning config file...");
@@ -35,6 +54,9 @@ void readConfig(fs::FS &fs){
       //Serial.printf("Found key: %s\n", key);
       String value = line.substring(eq+1);
       config[key]=value;
+      if (key == "proxy_host") {
+        allowedHost = parseIPAddress(value);
+      } 
     }
     configFile.close(); 
   } 
@@ -49,20 +71,31 @@ String generateSessionToken() {
 }
 
 bool is_admin() {
+  IPAddress clientIP = server.client().remoteIP();
   String token = server.header("Cookie");
   token = token.substring(token.indexOf("session=") + 8);
-  return sessions.count(token) > 0;
+  bool has_token = sessions.count(token) > 0;
+  if (has_token && clientIP == allowedHost) {
+    return true;
+  } else {
+    return false;
+  }
 }
 
 
 String renderHeader(){
+  String currentRoute = server.uri();
   String html = "<html><head><title>Adrenlinerush Library Catalog</title>";
   html += "<style> body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; font-size: large; Color: #000088; }";
   html += "a{display:block;float:left;padding:10px 15px;background:#aaa;border:1px solid #777;border-bottom:none;border-radius:4px 4px 0 0;margin-right:1px;color:#fff;text-decoration:none} </style>";
   html += "</head> <body> <h2>Adrenlinerush Library Catalog</h2>";
+  html += "<p><img src=\"/img?name=adrenaline.png\"></p>";
   html += "<a href=\"/\">Home</a>";
   html += "<a href=\"/search\">Search</a>";
-  html += "<a href=\"/desired\">Desired</a>";
+  if (currentRoute == "/details" && is_admin()) {
+    String id = server.arg("id");
+    html += "<a href=\"/edit?id=" + id +"\">Edit</a>";
+  }
   if (is_admin()) {
     html += "<a href=\"/add\">Add</a>";
     html += "<a href=\"/logout\">Log Out</a>";
@@ -92,7 +125,6 @@ void renderAdd(){
     server.sendHeader("Location", "/");
     server.sendHeader("Cache-Control", "no-cache");
     server.send(301);
-    return;
   }
 }
 
@@ -117,7 +149,8 @@ void handleAddBook() {
         sqlite3_bind_text(stmt, 6, synopsis.c_str(), -1, SQLITE_STATIC);
 
         if (sqlite3_step(stmt) == SQLITE_DONE) {
-	  server.sendHeader("Location", "/");
+  	  int64_t lastId = sqlite3_last_insert_rowid(db);
+	  server.sendHeader("Location", "/details?id="+String(lastId));
 	  server.sendHeader("Cache-Control", "no-cache");
 	  server.send(301);
         } else {
@@ -128,22 +161,16 @@ void handleAddBook() {
     }
     sqlite3_finalize(stmt);
   }
-  server.sendHeader("Location", "/");
+   server.sendHeader("Location", "/");
   server.sendHeader("Cache-Control", "no-cache");
   server.send(301);
-  return;
 }
 
 void renderLogin() {
-    String htmlContent = R"(
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Login</title>
-        </head>
-        <style> body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; font-size: large; Color: #000088; }</style>
-        <body>
-            <h2>Login</h2>
+  IPAddress clientIP = server.client().remoteIP();
+  if ( clientIP == allowedHost) {
+    String html = renderHeader();
+    html += R"(
             <form action="/authenticate" method="POST">
                 <label for="username">Username:</label><br>
                 <input type="text" id="username" name="username"><br>
@@ -154,7 +181,12 @@ void renderLogin() {
         </body>
         </html>
     )";
-    server.send(200, "text/html", htmlContent);
+    server.send(200, "text/html", html);
+  } else {
+    server.sendHeader("Location", "/");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.send(301);
+  }
 }
 
 void handleAuthenticate() {
@@ -188,7 +220,6 @@ void handleLogout() {
   server.sendHeader("Cache-Control", "no-cache");
   server.sendHeader("Set-Cookie", "session=deleted");
   server.send(301);
-  return;
 }
 
 void handleNotFound() {
@@ -244,6 +275,7 @@ void handleViewBooks() {
     html += "<table border=\"1\">";
     html += "<tr><th>Title</th><th>Author</th><th>ISBN</th><th>Location</th><th>Keywords</th><th>Actions</th></tr>";
 
+    int results = 0;
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
         int bindIndex = 1;
         
@@ -257,6 +289,7 @@ void handleViewBooks() {
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
           int id = sqlite3_column_int(stmt, 0);
+          results += 1;
           html += "<tr>";
           html += "<td>" + String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1))) + "</td>";
           html += "<td>" + String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))) + "</td>"; 
@@ -275,13 +308,13 @@ void handleViewBooks() {
         html += "<tr><td colspan=\"7\">Failed to retrieve books!</td></tr>";
     }
 
-    html += "</table></div>";
+    html += "</table></div><br/>";
 
     html += "<div>";
     if (page > 1) {
         html += "<a href=\"/?page=" + String(page - 1) + "\">Previous</a> ";
     }
-    if (sqlite3_data_count(stmt) == RESULTS_PER_PAGE) {
+    if (results == RESULTS_PER_PAGE) {
         html += "<a href=\"/?page=" + String(page + 1) + "\">Next</a>";
     }
     html += "</div>";
@@ -310,6 +343,9 @@ void renderDetails() {
             html += "<p><strong>Location:</strong> " + String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4))) + "</p>";
             html += "<p><strong>Keywords:</strong> " + String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5))) + "</p>";
             html += "<p><strong>Synopsis:</strong> " + String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6))) + "</p>";
+            html += "<table><tr><th>Cover</th></tr>";
+            html += "<tr><td><img src=\"https://covers.openlibrary.org/b/isbn/"+ String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3))) +"-L.jpg\">";
+            html += "</td></tr></table>";
         } else {
             html += "<p>Book not found!</p>";
         }
@@ -343,6 +379,94 @@ void renderSearch() {
     server.send(200, "text/html", html);
 }
 
+void renderEdit() {
+  if (is_admin()) {
+    int bookID = server.arg("id").toInt();
+    
+    sqlite3_stmt *stmt;
+    String sql = "SELECT title, author, isbn, location, keywords, synopsis FROM books WHERE id = ?";
+    
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, bookID);
+        
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            String title = String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+            String author = String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+            String isbn = String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)));
+            String location = String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)));
+            String keywords = String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)));
+            String synopsis = String(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5)));
+            
+            String html = renderHeader();
+            html += "<form action=\"/edit\" method=\"POST\">";
+            html += "<input type=\"hidden\" name=\"id\" value=\"" + String(bookID) + "\">";
+            html += "<label>Title:</label><input type=\"text\" name=\"title\" value=\"" + title + "\"><br>";
+            html += "<label>Author:</label><input type=\"text\" name=\"author\" value=\"" + author + "\"><br>";
+            html += "<label>ISBN:</label><input type=\"text\" name=\"isbn\" value=\"" + isbn + "\"><br>";
+            html += "<label>Location:</label><input type=\"text\" name=\"location\" value=\"" + location + "\"><br>";
+            html += "<label>Keywords:</label><input type=\"text\" name=\"keywords\" value=\"" + keywords + "\"><br>";
+            html += "<label>Synopsis:</label><textarea name=\"synopsis\">" + synopsis + "</textarea><br>";
+            html += "<input type=\"submit\" value=\"Update\">";
+            html += "</form>";
+            html += "</body></html>";
+            
+            server.send(200, "text/html", html);
+        } else {
+            server.send(404, "text/plain", "Book not found");
+        }
+    } else {
+        server.send(500, "text/plain", "Database error");
+    }
+    
+    sqlite3_finalize(stmt);
+  } else {
+    server.sendHeader("Location", "/");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.send(301);
+  }
+}
+
+void handleEditSubmit() {
+  if (is_admin()) {
+    int bookID = server.arg("id").toInt();
+    String title = server.arg("title");
+    String author = server.arg("author");
+    String isbn = server.arg("isbn");
+    String location = server.arg("location");
+    String keywords = server.arg("keywords");
+    String synopsis = server.arg("synopsis");
+
+    String sql = "UPDATE books SET title = ?, author = ?, isbn = ?, location = ?, keywords = ?, synopsis = ? WHERE id = ?";
+    sqlite3_stmt* stmt;
+    
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, title.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, author.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, isbn.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, location.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, keywords.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, synopsis.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 7, bookID);
+
+        if (sqlite3_step(stmt) == SQLITE_DONE) {
+            server.sendHeader("Location", "/details?id="+String(bookID));
+            server.sendHeader("Cache-Control", "no-cache");
+            server.send(301);
+        } else {
+            server.send(500, "text/plain", "Failed to update book");
+        }
+    } else {
+        server.send(500, "text/plain", "Database error");
+    }
+
+    sqlite3_finalize(stmt);
+  } else {
+    server.sendHeader("Location", "/");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.send(301);
+  }
+}
+
 void handleDeleteBook() {
   if (is_admin()) {
     int id = server.arg("id").toInt();
@@ -370,8 +494,36 @@ void handleDeleteBook() {
   }
 }
 
+void displayImageFiles() {
+    String filePath = server.uri(); 
+    if (filePath == "/img") {
+      String name = server.arg("name");
+      filePath = "/img/" + name;
+    }
+    
+    if (SD.exists(filePath)) {
+        File file = SD.open(filePath);
+        
+        String mimeType;
+        if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) {
+            mimeType = "image/jpeg";
+        } else if (filePath.endsWith(".png")) {
+            mimeType = "image/png";
+        } else if (filePath.endsWith(".gif")) {
+            mimeType = "image/gif";
+        } else {
+            mimeType = "application/octet-stream";
+        }
+        server.sendHeader("Cache-Control", "max-age=3600"); 
+        server.streamFile(file, mimeType);
+        file.close();
+    } else {
+        server.send(404, "text/plain", "404 Not Found");
+    }
+}
+
 int openDb(const char *filename) {
-  sqlite3_initialize();
+  //sqlite3_initialize();
   int rc = sqlite3_open(filename, &db);
   if (rc) {
       Serial.printf("Can't open database: %s\n", sqlite3_errmsg(db));
@@ -410,6 +562,11 @@ void setup ( void ) {
   Serial.print ( "IP address: " );
   Serial.println ( WiFi.localIP() );
 
+  if (!MDNS.begin("library"))  {
+    Serial.println("Error setting up MDNS responder!");
+  } else {
+    Serial.println("OK mDNS");
+  }
   
   if (openDb("/sd/library.db")) {
     sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, author TEXT NOT NULL, isbn TEXT, location TEXT, keywords TEXT, synopsis TEXT);", nullptr, nullptr, &errMsg);
@@ -426,6 +583,10 @@ void setup ( void ) {
   server.on("/details", HTTP_GET, renderDetails);
   server.on("/delete", HTTP_GET, handleDeleteBook);
   server.on("/search", HTTP_GET, renderSearch);
+  server.on("/edit", HTTP_GET, renderEdit);
+  server.on("/edit", HTTP_POST, handleEditSubmit);
+  server.on("/img", HTTP_GET, displayImageFiles);
+  server.on("/favicon.ico", HTTP_GET, displayImageFiles);
 
   server.onNotFound ( handleNotFound );
   server.begin();

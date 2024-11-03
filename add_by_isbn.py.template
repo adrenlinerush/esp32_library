@@ -1,0 +1,118 @@
+import requests
+import sys
+
+class BookInfo:
+    def __init__(self, isbn, title, authors, keywords, description, location):
+        self.isbn = isbn
+        self.title = title
+        self.authors = authors
+        self.keywords = keywords
+        self.description = description
+        self.location = location
+
+    def __repr__(self):
+        return (f"BookInfo(ISBN={self.isbn}, Title={self.title}, Authors={self.authors}, "
+                f"Keywords={self.keywords}, Description={self.description}, Location={self.location})")
+
+    def pretty_print(self):
+        print("Book Information:")
+        print(f"Title: {self.title}")
+        print(f"Authors: {', '.join(self.authors)}")
+        print(f"ISBN: {self.isbn}")
+        print(f"Location: {self.location}")
+        print(f"Keywords: {', '.join(self.keywords)}")
+        print(f"Synopsis: {self.description}")
+        print()
+
+def login(session):
+    login_url = "https://URL_OF_CARD_CATALOG/authenticate"
+    login_data = {
+        'username': 'USER_HERE',  # Hardcoded username
+        'password': 'PASSWORD_HERE'   # Hardcoded password
+    }
+    response = session.post(login_url, data=login_data)
+    
+    if response.status_code == 200:
+        print("Logged in successfully!")
+    else:
+        print("Login failed. Please check your credentials.")
+        sys.exit(1)
+
+def get_google_description(isbn):
+    url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+    response = requests.get(url)
+    data = response.json()
+    
+    if 'items' in data and len(data['items']) > 0:
+        google_book_info = data['items'][0]['volumeInfo']
+        return google_book_info.get('description', 'No description available.')
+    
+    return 'No description available.'
+
+def get_book_info(session, isbn, location):
+    url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
+    response = session.get(url)
+    data = response.json()
+
+    key = f"ISBN:{isbn}"
+    if key not in data:
+        print("Book not found.")
+        return None
+    
+    book_info = data[key]
+    title = book_info.get('title', 'Unknown Title')
+    authors = [author['name'] for author in book_info.get('authors', [{'name': 'Unknown Author'}])]
+    description = book_info.get('description', 'No description available.')
+    if isinstance(description, dict):  # If description is a dictionary, take the value
+        print("Fetching description from Google Books API...")
+        description = get_google_description(isbn)
+    categories = book_info.get('subjects', [])
+    
+    # Create keywords from title, authors, and categories
+    keywords = [title] + authors + [subject['name'] for subject in categories]
+    
+    # Create a BookInfo object
+    return BookInfo(isbn, title, authors, keywords, description, location)
+
+def add_to_library(session, book_info):
+    url = "https://URL_OF_CARD_CATALOG/add"
+    data = {
+        'title': book_info.title,
+        'author': ', '.join(book_info.authors),
+        'isbn': book_info.isbn,
+        'location': book_info.location,
+        'keywords': ', '.join(book_info.keywords),
+        'synopsis': book_info.description
+    }
+
+    response = session.post(url, data=data)
+    
+    if response.status_code == 200:
+        print("Book added to library successfully!")
+    else:
+        print(f"Failed to add book to library. Status code: {response.status_code}, Response: {response.text}")
+
+def main(isbn, location):
+    session = requests.Session()
+    login(session)
+    
+    book_info = get_book_info(session, isbn, location)
+    
+    if book_info:
+        book_info.pretty_print()
+        
+        confirm = input("Do you want to add this book to your library? (yes/no): ").strip().lower()
+        if confirm in ['yes', 'y']:
+            add_to_library(session, book_info)
+        else:
+            print("Book not added to library.")
+
+# Call the main function with ISBN and location passed as command-line arguments
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python script.py <ISBN> <Location>")
+        sys.exit(1)
+
+    isbn = sys.argv[1]      # The first command-line argument after the script name
+    location = sys.argv[2]  # The second command-line argument
+    main(isbn, location)
