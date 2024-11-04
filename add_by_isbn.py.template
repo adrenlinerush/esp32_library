@@ -1,5 +1,7 @@
 import requests
 import sys
+import re
+from bs4 import BeautifulSoup
 
 class BookInfo:
     def __init__(self, isbn, title, authors, keywords, description, location):
@@ -39,15 +41,44 @@ def login(session):
         sys.exit(1)
 
 def get_google_description(isbn):
+    print("Attempt to get synopsis from google.")
     url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
     response = requests.get(url)
     data = response.json()
-    
+
     if 'items' in data and len(data['items']) > 0:
         google_book_info = data['items'][0]['volumeInfo']
-        return google_book_info.get('description', 'No description available.')
-    
-    return 'No description available.'
+        return google_book_info.get('description', None)
+
+    return None
+
+def scrape_thriftbooks_synopsis(isbn):
+    print("Attempt to get synopsis from thriftbooks");
+    url = "https://www.thriftbooks.com/browse/?b.search=" + isbn
+
+    try:
+        response = requests.get(url)
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse the HTML content
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Locate the overview section in the page
+            overview_section = soup.find('p', class_='WorkMeta-overview')
+            if overview_section:
+                # Extract the synopsis text
+                synopsis = overview_section.get_text(strip=True)
+                return synopsis
+            else:
+                 print("Synopsis not found on ThriftBooks.")
+                 return None
+        else:
+           print(f"Failed to retrieve page, status code: {response.status_code}")
+           return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
 
 def get_book_info(session, isbn, location):
     url = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn}&format=json&jscmd=data"
@@ -62,10 +93,13 @@ def get_book_info(session, isbn, location):
     book_info = data[key]
     title = book_info.get('title', 'Unknown Title')
     authors = [author['name'] for author in book_info.get('authors', [{'name': 'Unknown Author'}])]
-    description = book_info.get('description', 'No description available.')
-    if isinstance(description, dict):  # If description is a dictionary, take the value
-        print("Fetching description from Google Books API...")
+    description = book_info.get('description')
+    if not description:
         description = get_google_description(isbn)
+        if not description:
+            description = scrape_thriftbooks_synopsis(isbn)
+        if not description:
+            description = "Synopsis not available."
     categories = book_info.get('subjects', [])
     
     # Create keywords from title, authors, and categories

@@ -7,6 +7,7 @@
 #include "SD.h"
 #include <ESPmDNS.h>
 #include <map>
+#include <time.h>
 
 std::map<String, String> config;
 std::map<String, String> sessions;
@@ -21,6 +22,7 @@ sqlite3_stmt *res;
 int rec_count = 0;
 const char *tail;
 char current_db[255];
+const char* db_filename = "/sd/library.db";
 
 WebServer server(80);
 
@@ -536,7 +538,38 @@ int openDb(const char *filename) {
   return rc;
 }
 
+void handleBackup() {
+  if (is_admin()) {
+    sqlite3_close(db);
+    const char* filename = strrchr(db_filename, '/');
+    File dbFile = SD.open(filename, FILE_READ);
+    if (!dbFile) {
+	server.send(500, "text/plain", "Failed to retreive backup.");
+	return;
+    }
+  
+    time_t now = time(nullptr);
+    String backupFilename = "library_db_backup-" + String(now) + ".db";
+
+    server.setContentLength(dbFile.size());
+    server.sendHeader("Content-Type", "application/octet-stream");
+    server.sendHeader("Content-Disposition", "attachment; filename="+backupFilename);
+    server.send(200);
+  
+    uint8_t buffer[128];
+    while (dbFile.available()) {
+      size_t bytesRead = dbFile.read(buffer, sizeof(buffer));
+      server.client().write(buffer, bytesRead);
+    }
+  
+    dbFile.close();
+    
+    openDb(db_filename);
+  }
+}
+
 void setup ( void ) {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   Serial.begin(115200);
   server.collectHeaders(headersToCollect,1);
   delay(5000);
@@ -568,11 +601,7 @@ void setup ( void ) {
     Serial.println("OK mDNS");
   }
   
-  if (openDb("/sd/library.db")) {
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, author TEXT NOT NULL, isbn TEXT, location TEXT, keywords TEXT, synopsis TEXT);", nullptr, nullptr, &errMsg);
-  } else {
-    Serial.println("Failed to open database");
-  }
+  openDb(db_filename);
 
   server.on("/", HTTP_GET, handleViewBooks);
   server.on("/login", HTTP_GET, renderLogin);
@@ -587,6 +616,7 @@ void setup ( void ) {
   server.on("/edit", HTTP_POST, handleEditSubmit);
   server.on("/img", HTTP_GET, displayImageFiles);
   server.on("/favicon.ico", HTTP_GET, displayImageFiles);
+  server.on("/backup", HTTP_GET, handleBackup);
 
   server.onNotFound ( handleNotFound );
   server.begin();

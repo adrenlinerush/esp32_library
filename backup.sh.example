@@ -1,0 +1,12 @@
+#!/bin/bash
+
+URL="URL_OF_CARD_CATALOG/"
+
+USERNAME="USER_HERE"
+PASSWORD='PASSWORD_HERE'
+COOKIE_FILE="cookies.txt"
+
+curl -c $COOKIE_FILE -X POST -w "%{http_code}" -d "username=${USERNAME}&password=${PASSWORD}" ${URL}authenticate
+curl -b $COOKIE_FILE -O -J ${URL}backup
+
+
