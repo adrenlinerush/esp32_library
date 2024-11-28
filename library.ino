@@ -264,11 +264,13 @@ void handleViewBooks() {
 
     String search = server.arg("search");
     String field = server.arg("field");
+    String search_paging = "";
     
     String sql = "SELECT * FROM books";
     if (search != "" && field != "") {
         sql += " WHERE " + field + " LIKE ?";
-        html += "<h2>Search Results</h2>";
+        html += "<h2>Search Results Page: " + String(page) + "</h2>";
+        search_paging = "&search="+search+"&field="+field;
     }
     sql += " LIMIT ? OFFSET ?;";
     sqlite3_stmt* stmt;
@@ -314,10 +316,10 @@ void handleViewBooks() {
 
     html += "<div>";
     if (page > 1) {
-        html += "<a href=\"/?page=" + String(page - 1) + "\">Previous</a> ";
+        html += "<a href=\"/?page=" + String(page - 1) + search_paging + "\">Previous</a> ";
     }
     if (results == RESULTS_PER_PAGE) {
-        html += "<a href=\"/?page=" + String(page + 1) + "\">Next</a>";
+        html += "<a href=\"/?page=" + String(page + 1) + search_paging + "\">Next</a>";
     }
     html += "</div>";
 
